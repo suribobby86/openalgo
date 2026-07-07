@@ -45,7 +45,12 @@ Strike Labels (different for CE and PE):
     - Strike ABOVE ATM: CE is OTM, PE is ITM
 """
 
+import os
+import threading
+import time
+from datetime import datetime, time as dt_time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from database.auth_db import get_auth_token_broker
 from database.symbol import SymToken, db_session
@@ -62,6 +67,54 @@ from utils.constants import CRYPTO_EXCHANGES, INSTRUMENT_PERPFUT
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+_CHAIN_CACHE: dict[str, tuple[dict[str, Any], float]] = {}
+_CHAIN_CACHE_LOCK = threading.Lock()
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _option_chain_cache_ttl() -> int:
+    now = datetime.now(_IST)
+    if now.weekday() < 5 and dt_time(9, 15) <= now.time() <= dt_time(15, 30):
+        return int(os.getenv("OPTIONCHAIN_CACHE_TTL", "8"))
+    return int(os.getenv("OPTIONCHAIN_CACHE_TTL_OFF", "300"))
+
+
+def _option_chain_cache_key(
+    underlying: str,
+    exchange: str,
+    expiry_date: str,
+    strike_count: int | None,
+    with_quotes: bool,
+) -> str:
+    sc = "all" if strike_count is None else str(strike_count)
+    return f"{underlying.upper()}|{exchange.upper()}|{expiry_date.upper()}|{sc}|{int(with_quotes)}"
+
+
+def _get_option_chain_cached(key: str) -> dict[str, Any] | None:
+    with _CHAIN_CACHE_LOCK:
+        entry = _CHAIN_CACHE.get(key)
+        if entry is None:
+            return None
+        payload, expires_at = entry
+        if expires_at < time.time():
+            _CHAIN_CACHE.pop(key, None)
+            return None
+        return payload
+
+
+def _set_option_chain_cached(key: str, payload: dict[str, Any]) -> None:
+    ttl = _option_chain_cache_ttl()
+    with _CHAIN_CACHE_LOCK:
+        _CHAIN_CACHE[key] = (payload, time.time() + ttl)
+        if len(_CHAIN_CACHE) > 256:
+            oldest = min(_CHAIN_CACHE.items(), key=lambda item: item[1][1])[0]
+            _CHAIN_CACHE.pop(oldest, None)
+
+
+def clear_option_chain_cache() -> None:
+    with _CHAIN_CACHE_LOCK:
+        _CHAIN_CACHE.clear()
 
 
 def get_strikes_with_labels(
@@ -242,6 +295,12 @@ def get_option_chain(
     Returns:
         Tuple of (success, response_data, status_code)
     """
+    cache_key = _option_chain_cache_key(underlying, exchange, expiry_date, strike_count, with_quotes)
+    cached = _get_option_chain_cached(cache_key)
+    if cached is not None:
+        logger.debug("Option chain cache hit: %s", cache_key)
+        return True, cached, 200
+
     try:
         # Step 1: Parse underlying symbol
         base_symbol, embedded_expiry = parse_underlying_symbol(underlying)
@@ -495,20 +554,18 @@ def get_option_chain(
 
             chain.append(strike_data)
 
-        return (
-            True,
-            {
-                "status": "success",
-                "underlying": base_symbol,
-                "underlying_ltp": underlying_ltp,
-                "underlying_prev_close": underlying_prev_close,
-                "expiry_date": final_expiry,
-                "atm_strike": atm_strike,
-                "quotes_included": with_quotes,
-                "chain": chain,
-            },
-            200,
-        )
+        response = {
+            "status": "success",
+            "underlying": base_symbol,
+            "underlying_ltp": underlying_ltp,
+            "underlying_prev_close": underlying_prev_close,
+            "expiry_date": final_expiry,
+            "atm_strike": atm_strike,
+            "quotes_included": with_quotes,
+            "chain": chain,
+        }
+        _set_option_chain_cached(cache_key, response)
+        return True, response, 200
 
     except Exception as e:
         logger.exception(f"Error in get_option_chain: {e}")

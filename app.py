@@ -268,6 +268,10 @@ def create_app():
 
     app.register_blueprint(api_v1_bp)
 
+    from utils.api_compression import init_api_compression
+
+    init_api_compression(app)
+
     # Exempt API endpoints from CSRF protection (they use API key authentication)
     csrf.exempt(api_v1_bp)
 

@@ -1,0 +1,1 @@
+"""OpenAlgo FastAPI v2 skeleton — parallel to Flask /api/v1 (migration path)."""
