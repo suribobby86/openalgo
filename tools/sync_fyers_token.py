@@ -130,6 +130,19 @@ def main() -> None:
     db_session.commit()
     print(f"Synced {updated} fyers auth row(s). Open http://127.0.0.1:5000/auth/resume-broker if needed.")
 
+    try:
+        from database.master_contract_status_db import init_broker_status
+        from utils.auth_utils import async_master_contract_download, load_existing_master_contract, should_download_master_contract
+        from threading import Thread
+
+        init_broker_status("fyers")
+        should_download, reason = should_download_master_contract("fyers")
+        target = async_master_contract_download if should_download else load_existing_master_contract
+        print(f"Master contracts: {'download' if should_download else 'cache reload'} ({reason})")
+        Thread(target=target, args=("fyers",), daemon=True).start()
+    except Exception as exc:
+        print(f"Master contract kickoff skipped: {exc}")
+
 
 if __name__ == "__main__":
     main()
