@@ -353,6 +353,51 @@ def login():
     return redirect("/login")
 
 
+@auth_bp.route("/resume-broker", methods=["GET"])
+@limiter.limit(LOGIN_RATE_LIMIT_MIN)
+@limiter.limit(LOGIN_RATE_LIMIT_HOUR)
+def resume_broker():
+    """Activate a DB-synced broker token into the browser session (no OAuth).
+
+    Used by nse_options_analyzer trade-ctl morning / Fyers token sync: the
+    access token is written to the auth DB, then this route promotes it into
+    session['logged_in'] so the UI reaches /dashboard without Connect Fyers.
+    """
+    if session.get("logged_in") and is_session_valid():
+        from database.auth_db import get_auth_token
+
+        if get_auth_token(session.get("user")):
+            logger.info(
+                f"[RESUME-BROKER] Already fully logged in as {session.get('user')}"
+            )
+            return redirect("/dashboard")
+
+    if "user" not in session:
+        logger.info("[RESUME-BROKER] No password session — redirecting to /login")
+        return redirect("/login")
+
+    username = session["user"]
+    resumed = _try_resume_broker_session(username)
+    if resumed:
+        from database.auth_db import log_login_attempt
+
+        log_login_attempt(
+            username,
+            get_real_ip(),
+            request.headers.get("User-Agent", ""),
+            status="success",
+            login_type="resume",
+            broker=session.get("broker"),
+        )
+        logger.info(f"[RESUME-BROKER] Session activated for {username} → /dashboard")
+        return redirect("/dashboard")
+
+    logger.info(
+        f"[RESUME-BROKER] No valid broker token for {username} — redirecting to /broker"
+    )
+    return redirect("/broker")
+
+
 @auth_bp.route("/login/totp", methods=["POST"])
 @limiter.limit(LOGIN_RATE_LIMIT_MIN)
 @limiter.limit(LOGIN_RATE_LIMIT_HOUR)
