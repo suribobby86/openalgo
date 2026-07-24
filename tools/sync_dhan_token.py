@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,8 +15,33 @@ from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
 import httpx
+from sqlalchemy.exc import OperationalError
 
 from database.auth_db import Auth, db_session, decrypt_token, upsert_auth
+
+
+def _upsert_with_retry(**kwargs):
+    """Retry upsert when OpenAlgo holds sqlite write lock (common on /mnt/c)."""
+    last_exc: Exception | None = None
+    for attempt in range(1, 9):
+        try:
+            return upsert_auth(**kwargs)
+        except OperationalError as exc:
+            msg = str(exc).lower()
+            if "database is locked" not in msg and "locked" not in msg:
+                raise
+            last_exc = exc
+            wait = min(2.0 * attempt, 10.0)
+            print(
+                f"Auth DB locked (attempt {attempt}/8) — retrying in {wait:.0f}s…"
+            )
+            try:
+                db_session.rollback()
+            except Exception:
+                pass
+            time.sleep(wait)
+    assert last_exc is not None
+    raise last_exc
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -112,8 +138,10 @@ def main() -> None:
     targets = [r for r in rows if r.name == username] or rows
 
     if not targets:
-        upsert_auth(username, token, "dhan", revoke=False)
-        db_session.commit()
+        # upsert_auth commits internally — do not commit again (extra lock risk).
+        _upsert_with_retry(
+            name=username, auth_token=token, broker="dhan", revoke=False
+        )
         print(f"Created dhan auth row for {username!r}")
     else:
         updated = 0
@@ -121,7 +149,7 @@ def main() -> None:
             old = decrypt_token(row.auth) if row.auth else ""
             same = old == token
             print(f"Updating auth row name={row.name!r} same_token={same}")
-            upsert_auth(
+            _upsert_with_retry(
                 name=row.name,
                 auth_token=token,
                 broker="dhan",
@@ -131,7 +159,6 @@ def main() -> None:
             )
             updated += 1
 
-        db_session.commit()
         print(
             f"Synced {updated} dhan auth row(s). "
             "Open http://127.0.0.1:5000/auth/resume-broker if needed."

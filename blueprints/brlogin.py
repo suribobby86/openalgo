@@ -41,8 +41,10 @@ def broker_callback(broker, para=None):
     logger.debug(f"Session contents: {dict(session)}")
     logger.info(f"Session has user key: {'user' in session}")
 
-    # Special handling for brokers that come from external auth and might lose session
-    if broker in ("compositedge", "rmoney", "iiflcapital") and "user" not in session:
+    # Special handling for brokers that come from external auth and might lose session.
+    # Dhan OAuth redirects from auth.dhan.co — Flask session cookie is often missing
+    # (or password session expired). Still accept the callback and bind admin user later.
+    if broker in ("compositedge", "rmoney", "iiflcapital", "dhan") and "user" not in session:
         # Session will be established after successful auth token validation
         logger.info(f"{broker} callback without session - will establish session after auth")
     # Special handling for mstock POST - check session but provide better error instead of redirect
@@ -55,7 +57,17 @@ def broker_callback(broker, para=None):
             logger.warning(f"User not in session for {broker} callback, redirecting to login")
             return redirect(url_for("auth.login"))
 
-    if session.get("logged_in"):
+    # Do NOT short-circuit when already logged_in if this is a fresh OAuth token
+    # callback (e.g. Dhan tokenId). Skipping here dropped renewals and left
+    # expired broker tokens in the auth DB while OpenAlgo itself stayed "up".
+    has_fresh_oauth = bool(
+        request.args.get("tokenId")
+        or request.args.get("token_id")
+        or request.args.get("code")
+        or request.args.get("request_token")
+        or request.args.get("request-token")
+    )
+    if session.get("logged_in") and not has_fresh_oauth:
         # Store broker in session and g
         session["broker"] = broker
         return redirect(url_for("dashboard_bp.dashboard"))
@@ -896,7 +908,7 @@ def broker_callback(broker, para=None):
         # For brokers that have user_id and feed_token from authenticate_broker
         if broker in ["angel", "compositedge", "pocketful", "definedge", "dhan", "rmoney", "iiflcapital"]:
             # For OAuth brokers, handle missing session user
-            if broker in ("compositedge", "rmoney", "iiflcapital") and "user" not in session:
+            if broker in ("compositedge", "rmoney", "iiflcapital", "dhan") and "user" not in session:
                 # Get the admin user from the database
                 from database.user_db import find_user_by_username
 
@@ -931,9 +943,22 @@ def broker_callback(broker, para=None):
 @limiter.limit(LOGIN_RATE_LIMIT_HOUR)
 def dhan_initiate_oauth():
     """Handle Dhan OAuth initiation"""
-    # Check if user is not in session first
+    # Allow initiate without password session — callback can bind admin user.
+    # Still prefer existing session when present.
     if "user" not in session:
-        return redirect(url_for("auth.login"))
+        try:
+            from database.user_db import find_user_by_username
+
+            admin_user = find_user_by_username()
+            if admin_user:
+                session["user"] = admin_user.username
+                logger.info(
+                    f"Dhan initiate-oauth: bound admin user {admin_user.username!r} into session"
+                )
+            else:
+                return redirect(url_for("auth.login"))
+        except Exception:
+            return redirect(url_for("auth.login"))
 
     # Get client_id from .env BROKER_API_KEY (format: client_id:::api_key)
     BROKER_API_KEY = os.getenv("BROKER_API_KEY")
