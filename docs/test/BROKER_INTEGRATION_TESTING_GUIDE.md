@@ -38,7 +38,7 @@ BROKER_API_SECRET_MARKET = '<market_secret>'
 cd openalgo
 uv run app.py
 # UI:        http://127.0.0.1:5000
-# Swagger:   http://127.0.0.1:5000/api/docs
+# REST reference: docs/api/README.md (Swagger is disabled)
 # API logs:  http://127.0.0.1:5000/analyzer
 # WS test:   http://127.0.0.1:5000/websocket/test
 ```
@@ -76,7 +76,7 @@ Only include segments the broker supports.
 | Currency | CDS | `USDINR<DDMMMYY>FUT` |
 | Commodity | MCX | `CRUDEOIL<DDMMMYY>FUT` |
 
-> ⚠️ Live order tests place **real orders**. Use **qty = 1**, prefer a low-price
+> Live order tests place **real orders**. Use **qty = 1**, prefer a low-price
 > equity (e.g. `YESBANK`), keep LIMIT prices away from LTP to avoid fills, and
 > cancel promptly. Use the **Analyzer (sandbox)** toggle for dry runs that never
 > reach the broker.
