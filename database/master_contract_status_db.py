@@ -10,8 +10,9 @@ from sqlalchemy.pool import NullPool
 
 logger = logging.getLogger(__name__)
 
-# If a download stays in 'downloading' state longer than this, treat it as stuck/failed
-DOWNLOAD_TIMEOUT_MINUTES = 5
+# If a download stays in 'downloading' state longer than this, treat it as stuck/failed.
+# Dhan full master (~200k symbols) often needs 8–15 minutes on WSL /mnt/c SQLite.
+DOWNLOAD_TIMEOUT_MINUTES = 20
 
 # Get the database path from environment variable or use default
 DB_PATH = os.getenv("DATABASE_URL", "sqlite:///db/openalgo.db")

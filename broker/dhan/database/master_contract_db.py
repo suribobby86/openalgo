@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -89,27 +90,43 @@ def copy_from_dataframe(df):
 def download_csv_dhan_data(output_path):
     logger.info("Downloading Master Contract CSV Files")
     # URLs of the CSV files to be downloaded
+    # Note: full scrip master is ~25MB; WSL/slow links need more than 10s.
     csv_urls = {"master": "https://images.dhan.co/api-data/api-scrip-master.csv"}
 
     # Create a list to hold the paths of the downloaded files
     downloaded_files = []
+    os.makedirs(output_path, exist_ok=True)
 
     # Iterate through the URLs and download the CSV files
     for key, url in csv_urls.items():
-        # Send GET request
-        response = requests.get(url, timeout=10)
+        # Send GET request (connect + read timeouts; large body)
+        try:
+            response = requests.get(url, timeout=(30, 300))
+        except requests.RequestException as exc:
+            logger.error(f"Failed to download {key} from {url}: {exc}")
+            raise RuntimeError(f"Dhan master contract download failed for {key}: {exc}") from exc
         # Check if the request was successful
-        if response.status_code == 200:
+        if response.status_code == 200 and response.content:
             # Construct the full output path for the file
             file_path = f"{output_path}/{key}.csv"
             # Write the content to the file
             with open(file_path, "wb") as file:
                 file.write(response.content)
             downloaded_files.append(file_path)
-        else:
-            logger.error(
-                f"Failed to download {key} from {url}. Status code: {response.status_code}"
+            logger.info(
+                f"Downloaded {key}: {len(response.content)} bytes → {file_path}"
             )
+        else:
+            msg = (
+                f"Failed to download {key} from {url}. "
+                f"Status code: {response.status_code}, bytes: {len(response.content or b'')}"
+            )
+            logger.error(msg)
+            raise RuntimeError(msg)
+
+    if not downloaded_files:
+        raise RuntimeError("No master contract CSV files were downloaded from Dhan")
+    return downloaded_files
 
 
 def reformat_symbol(row):
@@ -372,11 +389,17 @@ def delete_dhan_temp_data(output_path):
 def master_contract_download():
     logger.info("Downloading Master Contract")
 
-    output_path = "tmp"
+    # Prefer package-relative tmp so cwd does not matter (service / WSL)
+    package_root = Path(__file__).resolve().parents[3]
+    output_path = str(package_root / "tmp")
+    os.makedirs(output_path, exist_ok=True)
     try:
+        # Download + parse first; only wipe DB after a valid dataframe exists.
         download_csv_dhan_data(output_path)
-        delete_symtoken_table()
         token_df = process_dhan_csv(output_path)
+        if token_df is None or len(token_df) == 0:
+            raise RuntimeError("Processed Dhan master contract dataframe is empty")
+        delete_symtoken_table()
         copy_from_dataframe(token_df)
         delete_dhan_temp_data(output_path)
         # token_df['token'] = pd.to_numeric(token_df['token'], errors='coerce').fillna(-1).astype(int)
@@ -384,7 +407,11 @@ def master_contract_download():
         # token_df = token_df.drop_duplicates(subset='symbol', keep='first')
 
         return socketio.emit(
-            "master_contract_download", {"status": "success", "message": "Successfully Downloaded"}
+            "master_contract_download",
+            {
+                "status": "success",
+                "message": f"Successfully Downloaded ({len(token_df)} rows)",
+            },
         )
 
     except Exception as e:
