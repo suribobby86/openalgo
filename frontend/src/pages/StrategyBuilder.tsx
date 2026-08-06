@@ -305,6 +305,13 @@ export default function StrategyBuilder() {
         } else {
           setExpiries([])
           setSelectedExpiry('')
+          // Empty expiries almost always mean master contracts are missing /
+          // still downloading. Surface that explicitly — otherwise the page
+          // stays blank and template clicks only say "Option chain not loaded yet".
+          const detail =
+            optsRes.message ||
+            `No option expiries for ${selectedUnderlying}. Download master contracts (Master Contract page or force_master_contract_download.py) and restart OpenAlgo.`
+          showToast.error(detail)
         }
         if (futsRes.status === 'success' && Array.isArray(futsRes.data)) {
           setFutureExpiries(normaliseList(futsRes.data))
@@ -750,13 +757,17 @@ export default function StrategyBuilder() {
   const handleTemplatePick = useCallback(
     (tpl: StrategyTemplate) => {
       if (!chainData || atmStrike === null) {
-        showToast.error('Option chain not loaded yet')
+        showToast.error(
+          expiries.length === 0
+            ? 'Option chain not loaded — no expiries found. Download master contracts and refresh.'
+            : 'Option chain not loaded yet — wait for the chain to finish loading, or refresh.'
+        )
         return
       }
       setActiveTemplate(tpl)
       setTemplateDialogOpen(true)
     },
-    [chainData, atmStrike]
+    [chainData, atmStrike, expiries.length]
   )
 
   const handleTemplateConfirm = useCallback(
@@ -766,7 +777,9 @@ export default function StrategyBuilder() {
         return
       }
       if (!apiKey || !chainData) {
-        showToast.error('Option chain not loaded yet')
+        showToast.error(
+          'Option chain not loaded yet — wait for the chain to finish loading, or refresh.'
+        )
         return
       }
 

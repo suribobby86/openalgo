@@ -61,6 +61,7 @@ from services.option_symbol_service import (
     find_atm_strike_from_actual,
     get_available_strikes,
     get_option_exchange,
+    normalize_expiry_formats,
     parse_underlying_symbol,
 )
 from services.quotes_service import get_multiquotes, get_quotes, import_broker_module
@@ -191,9 +192,11 @@ def get_option_symbols_for_chain(
     """
     chain_symbols = []
 
-    # Convert expiry format for database lookup (DDMMMYY -> DD-MMM-YY)
-    # e.g., "28FEB25" -> "28-FEB-25"
-    expiry_db_fmt = f"{expiry_date[:2]}-{expiry_date[2:5]}-{expiry_date[5:]}".upper()
+    # Convert expiry format for database lookup (DDMMMYY or DD-MMM-YY -> DD-MMM-YY)
+    # and compact DDMMMYY for OpenAlgo option symbol construction.
+    expiry_compact, expiry_db_fmt = normalize_expiry_formats(expiry_date)
+    expiry_db_fmt = expiry_db_fmt.upper()
+    expiry_compact = expiry_compact.upper()
 
     for strike_info in strikes_with_labels:
         strike = strike_info["strike"]
@@ -230,9 +233,9 @@ def get_option_symbols_for_chain(
             ce_symbol = ce_record.symbol if ce_record else f"{base_symbol}-UNKNOWN-{strike_int}-CE"
             pe_symbol = pe_record.symbol if pe_record else f"{base_symbol}-UNKNOWN-{strike_int}-PE"
         else:
-            # Construct symbol names (Indian FNO format)
-            ce_symbol = construct_option_symbol(base_symbol, expiry_date, strike, "CE")
-            pe_symbol = construct_option_symbol(base_symbol, expiry_date, strike, "PE")
+            # Construct symbol names (Indian FNO format) — always DDMMMYY
+            ce_symbol = construct_option_symbol(base_symbol, expiry_compact, strike, "CE")
+            pe_symbol = construct_option_symbol(base_symbol, expiry_compact, strike, "PE")
 
             # Query database for both CE and PE
             ce_record = (
@@ -305,7 +308,10 @@ def get_option_chain(
     try:
         # Step 1: Parse underlying symbol
         base_symbol, embedded_expiry = parse_underlying_symbol(underlying)
-        final_expiry = embedded_expiry or expiry_date
+        raw_expiry = embedded_expiry or expiry_date
+        # Normalize so both DDMMMYY and DD-MMM-YY callers work end-to-end
+        final_expiry, _ = normalize_expiry_formats(raw_expiry)
+        final_expiry = final_expiry.upper()
 
         if not final_expiry:
             return False, {"status": "error", "message": "Expiry date is required."}, 400

@@ -62,6 +62,7 @@ def delete_symtoken_table():
 
 
 def copy_from_dataframe(df):
+    """Insert rows that are not already present (incremental / partial loads)."""
     logger.info("Performing Bulk Insert")
     # Convert DataFrame to a list of dictionaries
     data_dict = df.to_dict(orient="records")
@@ -85,6 +86,38 @@ def copy_from_dataframe(df):
     except Exception as e:
         logger.exception(f"Error during bulk insert: {e}")
         db_session.rollback()
+        raise
+
+
+def replace_symtoken_from_dataframe(df):
+    """Atomically replace the entire symtoken table.
+
+    Previous flow committed DELETE first, then INSERT. If the insert failed
+    (SQLite lock on WSL, OOM, etc.) the table stayed empty forever — which
+    breaks /expiry, /optionchain, and Strategy Builder ("Option chain not
+    loaded yet"). Keep delete+insert in one transaction so a failure rolls
+    back to the previous symbol set.
+    """
+    logger.info("Performing atomic Symtoken replace")
+    data_dict = df.to_dict(orient="records")
+    if not data_dict:
+        raise RuntimeError("Cannot replace symtoken with empty dataframe")
+
+    try:
+        SymToken.query.delete()
+        # Chunk bulk inserts — single 200k+ mapping can hold a write lock for
+        # minutes on /mnt/c SQLite and starve the live OpenAlgo process.
+        chunk_size = 5000
+        for i in range(0, len(data_dict), chunk_size):
+            db_session.bulk_insert_mappings(SymToken, data_dict[i : i + chunk_size])
+        db_session.commit()
+        logger.info(
+            f"Atomic symtoken replace completed successfully with {len(data_dict)} records."
+        )
+    except Exception as e:
+        logger.exception(f"Error during atomic symtoken replace: {e}")
+        db_session.rollback()
+        raise
 
 
 def download_csv_dhan_data(output_path):
@@ -394,13 +427,14 @@ def master_contract_download():
     output_path = str(package_root / "tmp")
     os.makedirs(output_path, exist_ok=True)
     try:
-        # Download + parse first; only wipe DB after a valid dataframe exists.
+        # Download + parse first; only touch DB after a valid dataframe exists.
+        # Use atomic replace so a failed insert cannot leave symtoken empty
+        # (that is what surfaces as "Option chain not loaded yet" in Strategy Builder).
         download_csv_dhan_data(output_path)
         token_df = process_dhan_csv(output_path)
         if token_df is None or len(token_df) == 0:
             raise RuntimeError("Processed Dhan master contract dataframe is empty")
-        delete_symtoken_table()
-        copy_from_dataframe(token_df)
+        replace_symtoken_from_dataframe(token_df)
         delete_dhan_temp_data(output_path)
         # token_df['token'] = pd.to_numeric(token_df['token'], errors='coerce').fillna(-1).astype(int)
 

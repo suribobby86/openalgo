@@ -46,6 +46,38 @@ from utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+
+def normalize_expiry_formats(expiry_date: str) -> tuple[str, str]:
+    """Return (DDMMMYY, DD-MMM-YY) for strike/symbol lookups.
+
+    Accepts either wire format used by OpenAlgo:
+      - DDMMMYY   e.g. 11AUG26  (optionchain / strategy builder after normalize)
+      - DD-MMM-YY e.g. 11-AUG-26 (raw /expiry API response)
+
+    Historically get_available_strikes assumed DDMMMYY only and sliced
+    ``expiry[:2], [2:5], [5:]``. Passing ``11-AUG-26`` produced garbage
+    (``11--AU-G-26``) and empty strike lists → Strategy Builder
+    "Option chain not loaded yet".
+    """
+    raw = (expiry_date or "").strip().upper().replace(" ", "")
+    if not raw:
+        return "", ""
+    # Already DD-MMM-YY (or DD-MMM-YYYY)
+    if "-" in raw:
+        parts = [p for p in raw.split("-") if p]
+        if len(parts) >= 3:
+            day, mon, year = parts[0].zfill(2), parts[1][:3], parts[2][-2:]
+            compact = f"{day}{mon}{year}"
+            dashed = f"{day}-{mon}-{year}"
+            return compact, dashed
+    # Compact DDMMMYY / DMMMYY
+    compact = raw.replace("-", "")
+    if len(compact) >= 7:
+        day, mon, year = compact[:2], compact[2:5], compact[5:7]
+        return compact, f"{day}-{mon}-{year}"
+    return compact, compact
+
+
 # ============================================================================
 # STRIKES CACHE - In-Memory Cache for Ultra-Fast Lookups
 # ============================================================================
@@ -323,9 +355,11 @@ def get_available_strikes(
         _CACHE_STATS["misses"] += 1
         logger.debug(f"Cache MISS: Querying database for {base_symbol} {expiry_date} {option_type}")
 
-        # Convert expiry from DDMMMYY to DD-MMM-YY format used in database
-        # e.g., "28OCT25" -> "28-OCT-25"
-        expiry_formatted = f"{expiry_date[:2]}-{expiry_date[2:5]}-{expiry_date[5:]}"
+        # Accept both DDMMMYY and DD-MMM-YY from callers
+        expiry_no_hyphen, expiry_formatted = normalize_expiry_formats(expiry_date)
+        if not expiry_no_hyphen:
+            logger.warning("Empty expiry_date for get_available_strikes(%s)", base_symbol)
+            return []
 
         if exchange.upper() in CRYPTO_EXCHANGES:
             # CRYPTO canonical format: BTC28FEB2580000CE (Indian F&O-style, no dashes)
@@ -347,7 +381,6 @@ def get_available_strikes(
         else:
             # Construct symbol pattern: BASE + EXPIRY (without hyphens) + % wildcard
             # e.g., "NIFTY" + "18NOV25" + "%" = "NIFTY18NOV25%"
-            expiry_no_hyphen = expiry_date.upper()  # Already in DDMMMYY format
             symbol_pattern = f"{base_symbol}{expiry_no_hyphen}%{option_type.upper()}"
 
             # Query database for all strikes matching the criteria
